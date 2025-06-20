@@ -171,6 +171,55 @@ def sign_in():
         {'user_id': user.id, 'token': token, 'expires_at': expires_at},
     )
     connection.commit()
-
+    print(token)
     return jsonify({'token': token}), 200
+
+
+@api.route('/me/profile', methods=['GET', 'PATCH'])
+def profile():
+    token = request.headers.get('Authorization').replace('Bearer ', '')
+    connection = create_session().connection()
+
+    user_id = connection.execute(
+        text('SELECT user_id FROM tokens WHERE token = :token'), {'token': token}
+    ).fetchone()
+
+    if not user_id:
+        return jsonify({'error': 'Токен неверен'}), 401
+
+    if request.method == 'GET':
+        user = connection.execute(
+            text('SELECT * FROM users WHERE id = :user_id'), {'user_id': user_id[0]}
+        ).fetchone()
+        return (
+        jsonify(
+            {
+                'login': user[1],
+                'email': user[2],
+                'countryCode': user[3],
+                'isPublic': user[4],
+                'phone': user[5],
+            }
+        ),
+        200,
+    )
+
+    elif request.method == 'PATCH':
+        data = request.get_json()
+        update_query = []
+        update_values = {}
+
+        for key, value in data.items():
+            update_query.append(f"{key} = :{key}")
+            update_values[key] = value
+
+        update_query = ', '.join(update_query)
+
+        connection.execute(
+            text(f"UPDATE users SET {update_query} WHERE id = :user_id"),
+            {**update_values, 'user_id': user_id[0]},
+        )
+        connection.commit()
+
+        return jsonify({'message': 'Профиль обновлен'}), 200
 
