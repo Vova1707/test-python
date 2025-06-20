@@ -1,0 +1,20 @@
+[flake8]
+extend-select = ["R505", "C812", "ISC001", "B007", "CLB100"]
+max-expression-complexity = 7
+import-order-style = google
+ignore = W503, F811, ANN,
+exclude =
+    */migrations/,
+    .venv/,
+    env/,
+    .git,
+    venv/,
+
+per-file-ignores =
+    */migrations/,
+    */settings.py:ANN201,ANN001,
+    */models.py:ANN003,ANN002,
+    */tests_models.py:ANN102,ANN206,
+    */middleware.py:ANN102,ANN206
+line-length = 121
+inline-quotes = '

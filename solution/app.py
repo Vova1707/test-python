@@ -13,5 +13,9 @@ app.register_blueprint(api)
 
 if __name__ == "__main__":
     load_dotenv()
-    global_init(f"postgresql://{os.getenv('POSTGRES_USERNAME')}:{os.getenv('POSTGRES_PASSWORD')}@localhost:{os.getenv('POSTGRES_PORT', '5432')}/{os.getenv('POSTGRES_DATABASE')}")
-    app.run(port=5001)
+    global_init(
+        f"postgresql://{os.getenv('POSTGRES_USERNAME')}"
+        f":{os.getenv('POSTGRES_PASSWORD')}@localhost:"
+        f"{os.getenv('POSTGRES_PORT', '5432')}/{os.getenv('POSTGRES_DATABASE')}"
+    )
+    app.run(port=5002)
