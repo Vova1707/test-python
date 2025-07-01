@@ -4,6 +4,7 @@ from sqlalchemy import text
 import re
 import uuid
 import datetime
+from func import validate_token, get_user_login, create_tables, is_friend
 
 
 api = Blueprint('api', __name__, url_prefix='/api')
@@ -11,6 +12,7 @@ api = Blueprint('api', __name__, url_prefix='/api')
 
 @api.route('/ping', methods=['GET'])
 def ping():
+    create_tables()
     return jsonify({'status': 'ok'}), 200
 
 
@@ -171,18 +173,16 @@ def sign_in():
         {'user_id': user.id, 'token': token, 'expires_at': expires_at},
     )
     connection.commit()
-    print(token)
+    #print(token)
     return jsonify({'token': token}), 200
 
 
 @api.route('/me/profile', methods=['GET', 'PATCH'])
-def profile():
+def me():
     token = request.headers.get('Authorization').replace('Bearer ', '')
     connection = create_session().connection()
 
-    user_id = connection.execute(
-        text('SELECT user_id FROM tokens WHERE token = :token'), {'token': token}
-    ).fetchone()
+    user_id = validate_token(token)
 
     if not user_id:
         return jsonify({'error': 'Токен неверен'}), 401
@@ -223,3 +223,338 @@ def profile():
 
         return jsonify({'message': 'Профиль обновлен'}), 200
 
+
+@api.route('/profiles/<string:user_login>', methods=['POST'])
+def profiles(user_login):
+    connection = create_session().connection()
+    other_user = connection.execute(
+        text('SELECT * FROM users WHERE login = :login'), {'login': user_login}
+    ).fetchone()
+
+    token = request.headers.get('Authorization').replace('Bearer ', '')
+    user_id = validate_token(token)
+
+    if not other_user:
+        return jsonify({'error': 'User not found'}), 403
+
+    if token and user_id:
+        if other_user['is_public']:
+            return jsonify(other_user), 200
+        elif user_id == other_user['id']:
+            return jsonify(other_user), 200
+        else:
+            return jsonify({'error': 'Forbidden'}), 403
+    else:
+        return jsonify({'error': 'Invalid token'}), 401
+
+
+@api.route('/me/updatePassword', methods=['POST'])
+def update_password():
+    connection = create_session().connection()
+    token = request.headers.get('Authorization').replace('Bearer ', '')
+    user_id = validate_token(token)
+
+    data = request.get_json()
+    old_password = data.get('oldPassword')
+    new_password = data.get('newPassword')
+
+    if not user_id:
+        return jsonify({'error': 'User not found'}), 404
+    
+    user = connection.execute(
+        text('SELECT * FROM users WHERE id = :user_id'), {'user_id': user_id}
+    ).fetchone()
+
+    if not user['password'] == old_password:
+        return jsonify({'error': 'Invalid old password'}), 403
+
+    connection.execute(
+        text('UPDATE users SET password = :new_password WHERE id = :user_id'),
+        {'new_password': new_password, 'user_id': user_id}
+    )
+    connection.commit()
+
+    return jsonify({'status': 'ok'}), 200
+
+
+
+@api.route('/friends/add', methods=['POST'])
+def friends_add():
+    connection = create_session().connection()
+    token = request.headers.get('Authorization').replace('Bearer ', '')
+    user_id = validate_token(token)
+
+    data = request.get_json()
+    friend_login = data.get('login')
+
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    if friend_login == get_user_login(user_id):
+        return jsonify({'status': 'ok'}), 200
+
+    friend = connection.execute(
+        text('SELECT * FROM users WHERE login = :login'), {'login': friend_login}
+    ).fetchone()
+
+    if not friend:
+        return jsonify({'error': 'User not found'}), 404
+
+    existing_friendship = connection.execute(
+        text('SELECT * FROM friendships WHERE user_id = :user_id AND friend_id = :friend_id'),
+        {'user_id': user_id, 'friend_id': friend['id']}
+    ).fetchone()
+
+    if existing_friendship:
+        return jsonify({'status': 'ok'}), 200
+
+    connection.execute(
+        text('INSERT INTO friendships (user_id, friend_id, created_at) VALUES (:user_id, :friend_id, :created_at)'),
+        {'user_id': user_id, 'friend_id': friend['id'], 'created_at': datetime.now()}
+    )
+    connection.commit()
+
+    return jsonify({'status': 'ok'}), 200
+
+
+
+
+@api.route('/friends/remove', methods=['POST'])
+def friends_remove():
+    connection = create_session().connection()
+    token = request.headers.get('Authorization').replace('Bearer ', '')
+    user_id = validate_token(token)
+
+    data = request.get_json()
+    friend_login = data.get('login')
+
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    friend = connection.execute(
+        text('SELECT * FROM users WHERE login = :login'), {'login': friend_login}
+    ).fetchone()
+
+    if not friend:
+        return jsonify({'status': 'ok'}), 200
+
+    existing_friendship = connection.execute(
+        text('SELECT * FROM friendships WHERE user_id = :user_id AND friend_id = :friend_id'),
+        {'user_id': user_id, 'friend_id': friend['id']}
+    ).fetchone()
+
+    if not existing_friendship:
+        return jsonify({'status': 'ok'}), 200
+
+    connection.execute(
+        text('DELETE FROM friendships WHERE user_id = :user_id AND friend_id = :friend_id'),
+        {'user_id': user_id, 'friend_id': friend['id']}
+    )
+    connection.commit()
+
+    return jsonify({'status': 'ok'}), 200
+
+
+@api.route('/friends', methods=['GET'])
+def friends_list():
+    connection = create_session().connection()
+    token = request.headers.get('Authorization').replace('Bearer ', '')
+    user_id = validate_token(token)
+
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    limit = request.args.get('limit', 10, type=int)
+    offset = request.args.get('offset', 0, type=int)
+
+    friends = connection.execute(
+        text('''
+            SELECT user.login, friendships.created_at
+            FROM friendships
+            JOIN users ON friendships.friend_id = users.id
+            WHERE friendships.user_id = :user_id
+            ORDER BY friendships.created_at DESC
+        '''),
+        {'user_id': user_id, 'limit': limit, 'offset': offset}
+    ).fetchall()
+
+    return jsonify([{'login': friend[0], 'addedAt': friend[1].isoformat() + 'Z'} for friend in friends]), 200
+
+
+
+"""----------------ПОСТЫ-------------------------------"""
+@api.route('/posts/new', methods=['POST'])
+def submit_post():
+    connection = create_session().connection()
+    token = request.headers.get('Authorization').replace('Bearer ', '')
+    user_id = validate_token(token)
+
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    data = request.get_json()
+    content = data.get('content')
+    tags = data.get('tags')
+
+    post_id = connection.execute(
+        text('INSERT INTO posts (user_id, content, tags) VALUES (:user_id, :content, :tags) RETURNING id'),
+        {'user_id': user_id, 'content': content, 'tags': tags}
+    ).fetchone()[0]
+
+    connection.commit()
+
+    return jsonify({'id': post_id, 'content': content, 'tags': tags, 'created_at': datetime.now().isoformat() + 'Z'}), 200
+
+
+
+@api.route('/posts/int:post_id', methods=['GET']) 
+def get_post_by_id(post_id): 
+    connection = create_session().connection() 
+    token = request.headers.get('Authorization').replace('Bearer ', '') 
+    user_id = validate_token(token)
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    post = connection.execute(
+        text('SELECT * FROM posts WHERE id = :post_id'),
+        {'post_id': post_id}
+    ).fetchone()
+
+    if not post:
+        return jsonify({'error': 'Post not found'}), 404
+
+    if post['user_id'] != user_id and not is_friend(user_id, post['user_id']):
+        return jsonify({'error': 'Access denied'}), 404
+
+    return jsonify({
+        'id': post['id'],
+        'content': post['content'],
+        'tags': post['tags'],
+        'created_at': post['created_at'].isoformat() + 'Z'
+    }), 200
+
+
+@api.route('/posts/feed/my', methods=['GET']) 
+def get_my_feed(): 
+    connection = create_session().connection() 
+    token = request.headers.get('Authorization').replace('Bearer ', '') 
+    user_id = validate_token(token)
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    limit = request.args.get('limit', default=10, type=int)
+    offset = request.args.get('offset', default=0, type=int)
+
+    posts = connection.execute(
+        text('SELECT * FROM posts WHERE user_id = :user_id ORDER BY created_at DESC LIMIT :limit OFFSET :offset'),
+        {'user_id': user_id, 'limit': limit, 'offset': offset}
+    ).fetchall()
+
+    return jsonify([{
+        'id': post['id'],
+        'content': post['content'],
+        'tags': post['tags'],
+        'created_at': post['created_at'].isoformat() + 'Z'
+    } for post in posts]), 200
+
+
+@api.route('/posts/feed/string:login', methods=['GET']) 
+def get_feed_by_others(login): 
+    connection = create_session().connection() 
+    token = request.headers.get('Authorization').replace('Bearer ', '') 
+    user_id = validate_token(token)
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    limit = request.args.get('limit', default=10, type=int)
+    offset = request.args.get('offset', default=0, type=int)
+
+    user = connection.execute(
+        text('SELECT * FROM users WHERE login = :login'),
+        {'login': login}
+    ).fetchone()
+
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    if not user['isPublic'] and not is_friend(user_id, user['id']):
+        return jsonify({'error': 'Access denied'}), 404
+
+    posts = connection.execute(
+        text('SELECT * FROM posts WHERE user_id = :user_id ORDER BY created_at DESC LIMIT :limit OFFSET :offset'),
+        {'user_id': user['id'], 'limit': limit, 'offset': offset}
+    ).fetchall()
+
+    return jsonify([{
+        'id': post['id'],
+        'content': post['content'],
+        'tags': post['tags'],
+        'created_at': post['created_at'].isoformat() + 'Z'
+    } for post in posts]), 200
+
+
+"""----------------ЛАЙКИ И ДИСЛАЙКИ-------------------------------"""
+@api.route('/posts/int:post_id/like', methods=['POST']) 
+def like_post(post_id): 
+    connection = create_session().connection() 
+    token = request.headers.get('Authorization').replace('Bearer ', '') 
+    user_id = validate_token(token)
+
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    post = connection.execute(
+        text('SELECT * FROM posts WHERE id = :post_id'),
+        {'post_id': post_id}
+    ).fetchone()
+
+    if not post:
+        return jsonify({'error': 'Post not found'}), 404
+
+    if post['user_id'] != user_id and not is_friend(user_id, post['user_id']):
+        return jsonify({'error': 'Access denied'}), 404
+    
+    connection.execute(text('UPDATE posts SET likes = likes + 1 WHERE id = :post_id'), {'post_id': post_id})
+
+    connection.commit()
+
+    return jsonify({
+        'id': post[0],
+        'content': post[2],
+        'created_at': post[3].isoformat() + 'Z',
+        'likes': post[-2] + 1,
+        'dislikes': post[-1]
+    }), 200
+
+
+@api.route('/posts/int:post_id/dislike', methods=['POST']) 
+def dislike_post(post_id): 
+    connection = create_session().connection() 
+    token = request.headers.get('Authorization').replace('Bearer ', '') 
+    user_id = validate_token(token)
+
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    post = connection.execute(
+        text('SELECT * FROM posts WHERE id = :post_id'),
+        {'post_id': post_id}
+    ).fetchone()
+
+    if not post:
+        return jsonify({'error': 'Post not found'}), 404
+
+    if post['user_id'] != user_id and not is_friend(user_id, post['user_id']):
+        return jsonify({'error': 'Access denied'}), 404
+    
+    connection.execute(text('UPDATE posts SET dislikes = dislikes + 1 WHERE id = :post_id'), {'post_id': post_id})
+
+    connection.commit()
+
+    return jsonify({
+        'id': post[0],
+        'content': post[2],
+        'created_at': post[3].isoformat() + 'Z',
+        'likes': post[-2],
+        'dislikes': post[-1] + 1,
+    }), 200
